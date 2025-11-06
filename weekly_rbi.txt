@@ -1,0 +1,63 @@
+aoi = ee.Geometry(aoi_geojson['geometry'])
+
+# Your saved NDVI calibration
+m_coef = 0.9972435
+b_coef = 0.04344955
+
+# Load all raw S2 images in Mar–Apr 2025 over the AOI
+s2_coll = (
+    ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+      .filterBounds(aoi)
+      .filterDate('2025-03-01','2025-04-30')
+      .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE',80))
+      .map(lambda img: img.clip(aoi))
+      .sort('system:time_start')
+)
+
+# Function: compute calibrated, rice-masked RBI
+def make_rbi(img):
+    ndvi = img.normalizedDifference(['B8','B4'])
+    nbr  = img.normalizedDifference(['B8A','B12'])
+    ndvi_cal = ndvi.multiply(m_coef).add(b_coef)
+    rbi = nbr.subtract(ndvi_cal).divide(nbr.add(ndvi_cal)).rename('RBI')
+    riceMask = ee.Image('ESA/WorldCover/v100/2020') \
+                   .select('Map').eq(40)
+    return rbi.updateMask(riceMask) \
+              .copyProperties(img, ['system:time_start'])
+
+# Build an ImageCollection of RBI images
+rbi_series = s2_coll.map(make_rbi)
+
+# Prepare the map
+Map_ = geemap.Map(center=(15.46, 121.07), zoom=12)
+Map_.add_basemap("HYBRID")  # you can change to "SATELLITE", "TERRAIN", etc.
+
+# Add a median RGB backdrop for context
+rgb_median = s2_coll.median()
+Map_.addLayer(
+    rgb_median,
+    {'bands':['B4','B3','B2'], 'min':0, 'max':3000, 'gamma':1.3},
+    'Median RGB',
+    False
+)
+
+# Visualisation parameters
+rgbVis = {'bands':['B4','B3','B2'], 'min':0, 'max':3000, 'gamma':1.3}
+rbiVis = {'min':-0.5, 'max':0.5, 'palette':['blue','white','red']}
+
+# Convert to a list so we can loop
+size = rbi_series.size().getInfo()
+rbi_list = rbi_series.toList(size)
+s2_list  = s2_coll.toList(size)
+
+# Add each date’s RGB & RBI as separate layers (initially OFF)
+for i in range(size):
+    img_rbi = ee.Image(rbi_list.get(i))
+    img_s2  = ee.Image(s2_list.get(i))
+    date_str = ee.Date(img_rbi.get('system:time_start')) \
+                  .format('YYYY-MM-dd').getInfo()
+    Map_.addLayer(img_s2, rgbVis, f'RGB {date_str}', False)
+    Map_.addLayer(img_rbi, rbiVis, f'RBI {date_str}', False)
+
+# Show the map with layer controls
+Map_
